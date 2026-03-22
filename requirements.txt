@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+langchain-openai
+langchain-core
+langgraph
+openai
+tavily-python
+yfinance
+chromadb
+pypdf
+tiktoken
+python-dotenv
+httpx

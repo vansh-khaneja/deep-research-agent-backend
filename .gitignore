@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Data
+data/chromadb/
+data/annual_reports/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Frontend
+deep-research-agent-frontend/node_modules/
+deep-research-agent-frontend/.next/
+
+# Test
+test_tools.py
+
+# Claude
+.claude/
+
+# Misc
+*.log
