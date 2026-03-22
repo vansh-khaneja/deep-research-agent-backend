@@ -27,7 +27,10 @@ REPORT STRUCTURE (follow this):
 SECTOR-SPECIFIC TEMPLATE:
 {report_template}
 
-RESEARCH FINDINGS:
+RESEARCH SUMMARY:
+{summary}
+
+DETAILED FINDINGS:
 {findings}
 
 RULES:
@@ -64,6 +67,7 @@ async def generate_report(session: ResearchSession, sector_agent: BaseAgent) -> 
         sector=session.plan.sector.value,
         report_structure=report_structure,
         report_template=sector_agent.report_template,
+        summary=summary,
         findings=findings_text,
     )
 

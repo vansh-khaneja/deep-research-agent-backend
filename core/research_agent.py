@@ -1,419 +1,222 @@
-import json
 import logging
-from typing import TypedDict
 
-from langgraph.graph import StateGraph
+from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from config import settings
 from models.schemas import ResearchSession, SessionStatus
 from agents.base_agent import BaseAgent
 
 from tools.search import web_search
-from tools.finance import get_company_overview, get_financials
+from tools.finance import (
+    get_company_overview, get_financials,
+    get_balance_sheet, get_stock_price_history,
+)
 from tools.ticker_resolver import resolve_ticker
-from tools.memory import store_insight, get_summary, reset as reset_memory, record_tool_use
+from tools.calculator import (
+    calculate_growth_rate, calculate_cagr,
+    calculate_margin, calculate_ratio, compare_metrics,
+)
+from tools.memory import (
+    set_session, reset as reset_memory,
+    store_insight, get_insights, get_summary,
+    update_progress,
+)
 from core.report_agent import generate_report
 
 logger = logging.getLogger(__name__)
 
-# Smart LLM — for insight extraction, financial decisions (needs reasoning)
-llm_smart = ChatOpenAI(
-    api_key=settings.openai_api_key,
-    model=settings.openai_model_smart,
-    temperature=0.2,
-)
+# --- LLM ---
+# Use the fast model for the agent loop — it makes many calls and needs higher rate limits.
+# The smart model is reserved for the final report synthesis where quality matters most.
 
-# Fast LLM — for relevance checks, query refinement (simple yes/no or short text)
-llm_fast = ChatOpenAI(
+llm = ChatOpenAI(
     api_key=settings.openai_api_key,
     model=settings.openai_model_fast,
     temperature=0.2,
 )
 
+# --- All tools the agent can use ---
 
-# --- State ---
+ALL_TOOLS = [
+    # Research
+    web_search,
+    # Financial data
+    resolve_ticker,
+    get_company_overview,
+    get_financials,
+    get_balance_sheet,
+    get_stock_price_history,
+    # Calculations
+    calculate_growth_rate,
+    calculate_cagr,
+    calculate_margin,
+    calculate_ratio,
+    compare_metrics,
+    # Memory
+    store_insight,
+    get_insights,
+    get_summary,
+]
 
-class ResearchState(TypedDict):
-    user_query: str
-    research_goal: str
-    sector_context: str
+# --- System prompt template ---
 
-    current_query: str
-    step_number: int
-    max_steps: int
+AGENT_SYSTEM_PROMPT = """You are a senior financial research agent. You have access to tools for web search, financial data retrieval, and calculations.
 
-    insights: list[dict]
-    entities: list[str]
+## Your Research Plan
 
-    last_results: list[dict] | None
-    relevant: bool | None
-    need_financials: bool | None
+Research Goal: {research_goal}
+Query Type: {query_type}
+Sector: {sector}
 
-    done: bool
+Sector Context:
+{sector_context}
 
+Planned Research Steps (use as guidance, not as a rigid script):
+{planned_steps}
 
-# --- Nodes ---
+Key Entities to Investigate: {entities}
+Expected Report Sections: {report_structure}
 
-def search_node(state: ResearchState):
-    results = web_search.invoke({"query": state["current_query"]})
-    record_tool_use("web_search", state["step_number"], state["current_query"])
-    logger.info(f"Step {state['step_number']}: searched '{state['current_query']}' → {len(results)} results")
-    return {"last_results": results}
+## How to Work
 
+1. **BATCH TOOL CALLS.** This is critical for performance. Call MULTIPLE tools in a single turn whenever possible:
+   - After a web_search, call store_insight in the SAME turn (don't wait for a separate turn)
+   - Call resolve_ticker for multiple companies in one turn
+   - After resolve_ticker returns, call get_company_overview + get_financials + get_balance_sheet in one turn
+   - After getting financial data, call store_insight + calculate_growth_rate + calculate_margin all at once
+   - GOOD: web_search → [store_insight + next web_search] → [store_insight + resolve_ticker] → [get_financials + get_company_overview + get_balance_sheet]
+   - BAD: web_search → store_insight → next web_search → store_insight (one tool per turn wastes API calls)
 
-def insight_node(state: ResearchState):
-    results = state["last_results"] or []
-    if not results:
-        return {"relevant": False}
+2. **Use store_insight after every meaningful finding.** The final report is built entirely from stored insights. Findings NOT stored will be LOST. Include specific numbers and the source.
 
-    text = "\n\n".join(
-        f"Title: {r['title']}\nContent: {r['content'][:500]}"
-        for r in results[:4]
-    )
+3. **Start broad, then go deep.** Begin with web searches to understand the landscape, then use financial APIs for specific company data.
 
-    prompt = f"""You are a financial research analyst. Extract ONE key insight from these search results.
+4. **For company financial data, always:**
+   - First call resolve_ticker to get the Yahoo Finance ticker symbol
+   - Then batch: get_company_overview + get_financials + get_balance_sheet + get_stock_price_history in ONE turn
+   - Use calculator tools (calculate_growth_rate, calculate_margin, etc.) to derive metrics from raw data
 
-Research Goal: {state['research_goal']}
+5. **Avoid redundancy.** Don't search for information you already have from a previous tool call.
 
-Search Results:
-{text}
+6. **Prioritize authoritative sources** — official filings, investor presentations, analyst reports over SEO content farms.
 
-Return STRICT JSON with exactly 2 fields:
+7. **Cover all angles the plan asks for**, but adapt based on what you find. If you discover something important not in the plan, investigate it. If a planned step is already covered by earlier findings, skip it.
 
-1. "insight" — one key finding in 2-3 sentences WITH specific numbers (revenue, %, ratios)
+8. **Stop when done.** Once you have sufficient data covering the research goal, key financials, competitive context, risks, and forward outlook — stop. Do not keep searching for marginal additions.
 
-2. "entities" — ONLY publicly traded company names.
-   GOOD examples: ["Infosys", "TCS", "Wipro", "Sun Pharma", "HCL Technologies"]
-   BAD examples (NEVER include these): ["revenue", "EBITDA", "Q3 FY26", "growth outlook", "net profit", "deal pipeline", "employee metrics", "market", "sector"]
+9. **Always include specific numbers** in your insights: revenue figures, growth percentages, margins, P/E ratios, deal values, etc.
 
-   Rule: If you cannot buy stock in it, it is NOT an entity.
+## Important Rules
+- ALWAYS call multiple tools per turn when possible — this dramatically reduces latency
+- Call store_insight frequently — findings NOT stored will be LOST
+- Include the source URL or "yfinance" or "calculated" in each store_insight call
+- Step numbers should be sequential (1, 2, 3, ...)
+- Do NOT fabricate data — only store what tools return
+"""
 
-{{
-  "insight": "...",
-  "entities": ["CompanyName1", "CompanyName2"]
-}}"""
 
-    res = llm_smart.invoke([HumanMessage(content=prompt)])
+def _format_planned_steps(session: ResearchSession) -> str:
+    if not session.plan.steps:
+        return "No specific steps planned — use your judgment."
+    lines = []
+    for s in session.plan.steps:
+        tools_str = ", ".join(s.tools) if s.tools else "web_search"
+        lines.append(f"  {s.step_number}. {s.description} (suggested tools: {tools_str})")
+    return "\n".join(lines)
 
-    try:
-        data = json.loads(res.content)
-    except json.JSONDecodeError:
-        data = {"insight": res.content[:300], "entities": []}
 
-    # Store in memory
-    store_insight.invoke({
-        "step_number": state["step_number"],
-        "content": data["insight"],
-        "source": results[0].get("url", "web") if results else "web",
-    })
+# --- Progress-tracking wrapper ---
 
-    # Safety net — skip obvious non-company words the LLM might still pass
-    raw_entities = data.get("entities", [])
-    clean_entities = [
-        e for e in raw_entities
-        if len(e) > 2
-        and e[0].isupper()  # company names start with uppercase
-        and not any(w in e.lower() for w in ["revenue", "profit", "ebitda", "margin", "growth", "outlook", "metric", "q3", "q4", "fy2", "sector"])
-    ]
+class ProgressTracker:
+    """Wraps the agent stream to update progress as tool calls happen."""
 
-    new_entities = list(set(state.get("entities", []) + clean_entities))
+    def __init__(self):
+        self.tool_call_count = 0
 
-    return {
-        "insights": state.get("insights", []) + [data["insight"]],
-        "entities": new_entities,
-    }
-
-
-def relevance_node(state: ResearchState):
-    insights = state.get("insights", [])
-    if not insights:
-        return {"relevant": False}
-
-    latest = insights[-1]
-
-    prompt = f"""Research Goal: {state['research_goal']}
-
-Latest Finding:
-{latest}
-
-Is this finding useful and relevant for deep financial research on the goal?
-Answer only YES or NO."""
-
-    res = llm_fast.invoke([HumanMessage(content=prompt)])
-    relevant = "YES" in res.content.upper()
-    logger.info(f"Step {state['step_number']}: relevance = {relevant}")
-
-    return {"relevant": relevant}
-
-
-_fetched_tickers: set[str] = set()
-
-
-def financial_decision_node(state: ResearchState):
-    entities = state.get("entities", [])
-    if not entities:
-        return {"need_financials": False}
-
-    unfetched = [e for e in entities if e.lower() not in _fetched_tickers]
-    if not unfetched:
-        return {"need_financials": False}
-
-    summary = get_summary.invoke({})
-
-    prompt = f"""You are a financial research agent.
-
-Research goal: {state['research_goal']}
-
-Entities discovered: {entities}
-Entities WITHOUT financial data yet: {unfetched}
-
-Research findings so far:
-{summary}
-
-Do we need to fetch detailed financial data (stock price, revenue, margins, balance sheet) for the unfetched entities?
-
-Consider:
-- If the research goal involves financial analysis, comparison, or valuation → YES
-- If we already have enough financial numbers from web search → NO
-- If the query asks about trends, news, or regulations only → NO
-
-Answer YES or NO with brief reason."""
-
-    res = llm_fast.invoke([HumanMessage(content=prompt)])
-    need = "YES" in res.content.upper()
-    logger.info(f"Step {state['step_number']}: need_financials = {need} (unfetched: {unfetched}), LLM: {res.content[:50]}")
-
-    return {"need_financials": need}
-
-
-def financial_node(state: ResearchState):
-    entities = state.get("entities", [])
-    if not entities:
-        return {}
-
-    from tools.finance import get_balance_sheet, get_stock_price_history
-    from tools.calculator import calculate_growth_rate, calculate_margin
-
-    unfetched = [e for e in entities if e.lower() not in _fetched_tickers]
-    step = state["step_number"]
-
-    for idx, company in enumerate(unfetched):
-        current_step = step + idx  # each company gets its own step number
-
-        # Resolve ticker
-        ticker = resolve_ticker.invoke({"company_name": company})
-        record_tool_use("resolve_ticker", current_step, company)
-
-        if ticker == "NOT_FOUND":
-            logger.warning(f"Ticker not found for {company}")
-            continue
-
-        _fetched_tickers.add(company.lower())
-
-        # Company overview
-        overview = get_company_overview.invoke({"ticker": ticker})
-        record_tool_use("get_company_overview", current_step, ticker)
-
-        store_insight.invoke({
-            "step_number": current_step,
-            "content": f"{company} ({ticker}): Price={overview.get('current_price')}, "
-                       f"P/E={overview.get('pe_ratio')}, MarketCap={overview.get('market_cap')}, "
-                       f"Revenue Growth={overview.get('revenue_growth')}, "
-                       f"Profit Margin={overview.get('profit_margin')}, "
-                       f"ROE={overview.get('return_on_equity')}, D/E={overview.get('debt_to_equity')}",
-            "source": "yfinance",
-        })
-
-        # Quarterly financials
-        financials = get_financials.invoke({"ticker": ticker})
-        record_tool_use("get_financials", current_step, ticker)
-
-        quarters = financials.get("quarterly", [])
-        if len(quarters) >= 2:
-            q0, q1 = quarters[0], quarters[1]
-            store_insight.invoke({
-                "step_number": current_step,
-                "content": f"{company} latest quarter ({q0.get('period')}): "
-                           f"Revenue={q0.get('revenue')}, Net Income={q0.get('net_income')}, "
-                           f"EBITDA={q0.get('ebitda')}, Operating Income={q0.get('operating_income')}",
-                "source": "yfinance",
-            })
-
-            # Calculate QoQ growth
-            if q0.get("revenue") and q1.get("revenue"):
-                growth = calculate_growth_rate.invoke({"current": q0["revenue"], "previous": q1["revenue"]})
-                record_tool_use("calculate_growth_rate", current_step, f"{company} QoQ revenue")
-                store_insight.invoke({
-                    "step_number": current_step,
-                    "content": f"{company} QoQ revenue growth: {growth.get('formatted', 'N/A')}",
-                    "source": "calculated",
-                })
-
-            # Calculate profit margin
-            if q0.get("net_income") and q0.get("revenue"):
-                margin = calculate_margin.invoke({"part": q0["net_income"], "total": q0["revenue"]})
-                record_tool_use("calculate_margin", current_step, f"{company} profit margin")
-                store_insight.invoke({
-                    "step_number": current_step,
-                    "content": f"{company} net profit margin: {margin.get('formatted', 'N/A')}",
-                    "source": "calculated",
-                })
-
-        # Balance sheet
-        balance = get_balance_sheet.invoke({"ticker": ticker})
-        record_tool_use("get_balance_sheet", current_step, ticker)
-
-        bs = balance.get("balance_sheet", {})
-        if bs:
-            store_insight.invoke({
-                "step_number": current_step,
-                "content": f"{company} balance sheet: Total Assets={bs.get('total_assets')}, "
-                           f"Equity={bs.get('stockholders_equity')}, "
-                           f"Cash={bs.get('cash')}, Debt={bs.get('total_debt')}",
-                "source": "yfinance",
-            })
-
-        # Price history
-        prices = get_stock_price_history.invoke({"ticker": ticker})
-        record_tool_use("get_stock_price_history", current_step, ticker)
-
-        store_insight.invoke({
-            "step_number": current_step,
-            "content": f"{company} stock: Current={prices.get('current')}, "
-                       f"6mo High={prices.get('period_high')}, Low={prices.get('period_low')}",
-            "source": "yfinance",
-        })
-
-        logger.info(f"Step {current_step}: financial deep dive done for {company} ({ticker})")
-
-    return {}
-
-
-def refine_query_node(state: ResearchState):
-    summary = get_summary.invoke({})
-
-    prompt = f"""You are a financial research agent.
-
-Research goal: {state['research_goal']}
-Sector context: {state['sector_context']}
-
-Findings so far:
-{summary}
-
-Step {state['step_number']} of {state['max_steps']} completed.
-
-Generate the NEXT specific web search query to deepen this research.
-Focus on what's MISSING — financials, competitor data, risks, analyst views, or forward outlook.
-Return ONLY the search query, nothing else."""
-
-    res = llm_fast.invoke([HumanMessage(content=prompt)])
-    new_query = res.content.strip().strip('"')
-
-    logger.info(f"Step {state['step_number']}: refined query → '{new_query}'")
-
-    return {
-        "current_query": new_query,
-        "step_number": state["step_number"] + 1,
-    }
-
-
-# --- Router ---
-
-def controller_router(state: ResearchState):
-    if state["step_number"] >= state["max_steps"]:
-        return "finish"
-
-    if not state.get("relevant", True):
-        return "refine"
-
-    if state.get("need_financials", False):
-        return "financial"
-
-    return "refine"
-
-
-# --- Build Graph ---
-
-def build_graph():
-    workflow = StateGraph(ResearchState)
-
-    workflow.add_node("search", search_node)
-    workflow.add_node("insight", insight_node)
-    workflow.add_node("relevance", relevance_node)
-    workflow.add_node("financial_decision", financial_decision_node)
-    workflow.add_node("financial", financial_node)
-    workflow.add_node("refine", refine_query_node)
-
-    workflow.set_entry_point("search")
-
-    workflow.add_edge("search", "insight")
-    workflow.add_edge("insight", "relevance")
-    workflow.add_edge("relevance", "financial_decision")
-
-    workflow.add_conditional_edges(
-        "financial_decision",
-        controller_router,
-        {
-            "financial": "financial",
-            "refine": "refine",
-            "finish": "__end__",
-        }
-    )
-
-    workflow.add_edge("financial", "refine")
-    workflow.add_edge("refine", "search")
-
-    return workflow.compile()
-
-
-# Compile once
-research_graph = build_graph()
+    def on_tool_call(self, tool_name: str, tool_input: str = ""):
+        self.tool_call_count += 1
+        short_input = tool_input[:80] if tool_input else ""
+        update_progress(self.tool_call_count, f"{tool_name}: {short_input}")
 
 
 # --- Entry Point ---
 
 async def run_research(session: ResearchSession, sector_agent: BaseAgent) -> None:
-    """Execute the full research loop for a session."""
+    """Execute the research agent for a session."""
     try:
         session.status = SessionStatus.RESEARCHING
+        set_session(session.id)
         reset_memory()
-        _fetched_tickers.clear()
 
-        initial_state: ResearchState = {
-            "user_query": session.user_query,
-            "research_goal": session.plan.research_goal,
-            "sector_context": sector_agent.research_context,
-            "current_query": session.plan.steps[0].query_template if session.plan.steps else session.user_query,
-            "step_number": 1,
-            "max_steps": len(session.plan.steps) + 5,  # planned steps + room for dynamic ones
-            "insights": [],
-            "entities": session.plan.entities or [],
-            "last_results": None,
-            "relevant": None,
-            "need_financials": None,
-            "done": False,
-        }
+        max_steps = len(session.plan.steps) * 4 + 10  # generous budget for tool calls
 
-        logger.info(f"Starting research graph for session {session.id}, max_steps={initial_state['max_steps']}")
+        system_prompt = AGENT_SYSTEM_PROMPT.format(
+            research_goal=session.plan.research_goal,
+            query_type=session.plan.query_type,
+            sector=session.plan.sector.value,
+            sector_context=sector_agent.research_context,
+            planned_steps=_format_planned_steps(session),
+            entities=", ".join(session.plan.entities) if session.plan.entities else "None specified",
+            report_structure=", ".join(session.plan.report_structure) if session.plan.report_structure else "Use standard structure",
+            max_steps=max_steps,
+        )
 
-        # Run the graph
-        result = await research_graph.ainvoke(initial_state)
+        # Build the react agent
+        agent = create_react_agent(
+            model=llm,
+            tools=ALL_TOOLS,
+            prompt=system_prompt,
+        )
 
-        session.current_step = result.get("step_number", 0)
-        session.current_step_description = "Generating report..."
+        tracker = ProgressTracker()
+        update_progress(0, "Starting research...")
 
         logger.info(
-            f"Research done for session {session.id}: "
-            f"{len(result.get('insights', []))} insights, "
-            f"{len(result.get('entities', []))} entities. Synthesizing report..."
+            f"Starting research agent for session {session.id}, "
+            f"goal='{session.plan.research_goal}', max_steps={max_steps}"
         )
+
+        # Stream the agent to track progress in real-time
+        user_message = (
+            f"Research this query: {session.user_query}\n\n"
+            f"Begin your research now. Remember to call store_insight after each meaningful finding."
+        )
+
+        async for event in agent.astream(
+            {"messages": [HumanMessage(content=user_message)]},
+            config={"recursion_limit": max_steps},
+        ):
+            # Track tool calls for progress updates
+            if "messages" in event:
+                for msg in event["messages"]:
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tracker.on_tool_call(
+                                tc.get("name", "unknown"),
+                                str(tc.get("args", ""))[:80],
+                            )
+
+        session.current_step = tracker.tool_call_count
+        session.current_step_description = "Generating report..."
+
+        # Check we actually gathered insights
+        insights = get_insights.invoke({})
+        logger.info(
+            f"Research done for session {session.id}: "
+            f"{len(insights)} insights from {tracker.tool_call_count} tool calls. "
+            f"Generating report..."
+        )
+
+        if not insights:
+            logger.warning(f"Session {session.id}: No insights stored! Agent may have failed to call store_insight.")
 
         # Generate report
         session.report_markdown = await generate_report(session, sector_agent)
         session.current_step_description = "Report ready"
         session.status = SessionStatus.COMPLETED
+        update_progress(tracker.tool_call_count, "Report ready")
 
         logger.info(f"Report generated for session {session.id}")
 

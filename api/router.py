@@ -5,7 +5,7 @@ from models.schemas import (
     PlanResponse, StatusResponse, ReportResponse, InsightItem, ToolUseItem,
     SessionStatus, ResearchSession, Sector,
 )
-from tools.memory import get_insights, get_tools_used
+from tools.memory import get_insights, get_tools_used, set_session, get_progress
 from tools.llm import LLMClient
 from core.planner import SectorClassifier, ResearchPlanner
 from core.research_agent import run_research
@@ -112,7 +112,9 @@ async def get_status(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Pull live data from memory
+    # Set session context so memory reads the right session's data
+    set_session(session_id)
+
     raw_insights = get_insights.invoke({})
     insights = [
         InsightItem(step=i["step"], content=i["content"], source=i["source"])
@@ -125,12 +127,21 @@ async def get_status(session_id: str):
         for t in raw_tools
     ]
 
+    # Use live progress from memory during research, fall back to session fields when done
+    progress = get_progress()
+    if session.status == SessionStatus.RESEARCHING:
+        current_step = progress["current_step"]
+        description = progress["description"]
+    else:
+        current_step = session.current_step
+        description = session.current_step_description
+
     return StatusResponse(
         session_id=session.id,
         status=session.status,
-        current_step=session.current_step,
+        current_step=current_step,
         total_steps=session.total_steps,
-        current_step_description=session.current_step_description,
+        current_step_description=description,
         insights=insights,
         tools_used=tools_used,
     )
