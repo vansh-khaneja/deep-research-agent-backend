@@ -1,0 +1,36 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__(<p>__start__</p>)
+	plan_node(plan_node)
+	subqueries_node(subqueries_node)
+	search_worker(search_worker)
+	search_join(search_join)
+	plan_reads(plan_reads)
+	read_worker(read_worker)
+	read_join(read_join)
+	financial_data(financial_data)
+	calculate_metrics(calculate_metrics)
+	synthesize(synthesize)
+	reflect(reflect)
+	__end__(<p>__end__</p>)
+	__start__ --> plan_node;
+	calculate_metrics --> subqueries_node;
+	financial_data --> calculate_metrics;
+	plan_node --> financial_data;
+	plan_reads --> read_join;
+	read_join -. &nbsp;go&nbsp; .-> synthesize;
+	reflect -. &nbsp;stop&nbsp; .-> __end__;
+	reflect -. &nbsp;loop&nbsp; .-> subqueries_node;
+	search_join -. &nbsp;stop&nbsp; .-> __end__;
+	search_join -. &nbsp;go&nbsp; .-> plan_reads;
+	subqueries_node --> search_join;
+	synthesize --> reflect;
+	read_join -. &nbsp;wait&nbsp; .-> read_join;
+	search_join -. &nbsp;wait&nbsp; .-> search_join;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

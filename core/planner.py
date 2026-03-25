@@ -16,19 +16,31 @@ class ClassificationResult(BaseModel):
 
 
 class SectorClassifier:
-    def __init__(self, llm: LLMClient):
+    def __init__(self, llm: LLMClient, sector_descriptions: dict[str, str] | None = None):
         self.llm = llm
+        self._sector_descriptions: dict[str, str] = sector_descriptions or {}
+
+    def set_sectors(self, sector_descriptions: dict[str, str]):
+        """Update available sectors from the registry."""
+        self._sector_descriptions = sector_descriptions
 
     async def classify(self, query: str) -> tuple[str, ClassificationResult]:
-        """Returns (route, classification). Route: 'it', 'pharma', 'decline', or 'clarify'."""
+        """Returns (route, classification). Route: sector value, 'decline', or 'clarify'."""
 
-        system = """You are a financial research query classifier.
+        # Build sector list dynamically from registered agents
+        sector_lines = "\n".join(
+            f'{i+1}. "{key}" — {desc}'
+            for i, (key, desc) in enumerate(self._sector_descriptions.items())
+        )
+        next_num = len(self._sector_descriptions) + 1
+        valid_sectors = set(self._sector_descriptions.keys())
 
-Classify the query into:
-1. "it" — IT / Technology services sector
-2. "pharma" — Pharmaceutical / Healthcare sector
-3. "not_financial" — Not a financial query at all
-4. "unclear" — Financial but sector is ambiguous
+        system = f"""You are a financial research query classifier.
+
+Classify the query into one of the following sectors:
+{sector_lines}
+{next_num}. "not_financial" — Not a financial query at all
+{next_num + 1}. "unclear" — Financial but sector is ambiguous
 
 Respond with JSON matching the schema."""
 
@@ -40,7 +52,7 @@ Respond with JSON matching the schema."""
 
         if not result.is_financial or result.sector == "not_financial":
             route = "decline"
-        elif result.sector in ("it", "pharma"):
+        elif result.sector in valid_sectors:
             route = result.sector
         elif result.sector == "unclear":
             route = "clarify"
@@ -84,9 +96,16 @@ IMPORTANT: If the query mentions multiple companies, asks for comparison, covers
    - description: what this step investigates
    - query_template: the actual web search query to execute
    - tools: which tools to use from ["web_search", "financial_api", "rag_docs"]
+   - success_criteria: 2-3 specific QUESTIONS that must be answerable from collected data
+     for this step to be considered complete. These must be concrete and verifiable.
+     GOOD: "What was Infosys Q3 FY26 revenue in USD?" / "What is the attrition rate for Q3?"
+     BAD: "Is Infosys doing well?" / "Analyze the financials"
 
 5. Extract important entities:
-   - company names, technologies, themes, regulations mentioned or implied
+   - ONLY actual company names that have stock tickers (e.g., "Infosys", "TCS", "Sun Pharma", "Vedanta")
+   - Do NOT include generic words like "India", "AI", "automation", "semiconductor", "revenue"
+   - If no specific companies are mentioned, infer the most relevant 3-5 companies for the sector/topic
+   - Example: "semiconductor companies in India" → ["Vedanta", "Tata Electronics", "Bharat Electronics", "Dixon Technologies"]
 
 6. Decide tools needed from: ["web_search", "financial_api", "rag_docs", "calculation_engine"]
 
@@ -102,6 +121,7 @@ class PlannerStepOutput(BaseModel):
     description: str
     query_template: str
     tools: list[str] = ["web_search"]
+    success_criteria: list[str] = []
 
 
 class PlannerOutput(BaseModel):
@@ -139,6 +159,7 @@ class ResearchPlanner:
                 description=s.description,
                 query_template=s.query_template,
                 tools=s.tools,
+                success_criteria=s.success_criteria if s.success_criteria else [f"What does the research reveal about: {s.description}?"],
             )
             for s in result.steps
         ]
@@ -170,11 +191,11 @@ class ResearchPlanner:
         if len(steps) < 3:
             errors.append(f"Too few steps ({len(steps)}), need at least 3")
 
-        if result.research_depth == "deep" and len(steps) < 12:
-            errors.append(f"Deep research needs 12+ steps, got {len(steps)}")
+        if result.research_depth == "deep" and len(steps) < 8:
+            errors.append(f"Deep research needs 8+ steps, got {len(steps)}")
 
-        if result.research_depth == "medium" and len(steps) < 6:
-            errors.append(f"Medium research needs 6+ steps, got {len(steps)}")
+        if result.research_depth == "medium" and len(steps) < 4:
+            errors.append(f"Medium research needs 4+ steps, got {len(steps)}")
 
         # Check for empty/invalid fields
         if not result.research_goal or len(result.research_goal) < 10:

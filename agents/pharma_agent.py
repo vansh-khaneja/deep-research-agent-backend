@@ -9,6 +9,10 @@ class PharmaAgent(BaseAgent):
         return Sector.PHARMA
 
     @property
+    def sector_description(self) -> str:
+        return "Pharmaceutical / Healthcare sector"
+
+    @property
     def planning_context(self) -> str:
         return """You are planning research for the Pharmaceutical / Healthcare sector.
 Key areas to investigate:
@@ -23,20 +27,7 @@ Key areas to investigate:
 - Specialty vs generic portfolio mix
 - USFDA inspection outcomes
 
-Major Indian Pharma companies and their tickers:
-- Sun Pharma: SUNPHARMA.NS
-- Dr. Reddy's: DRREDDY.NS
-- Cipla: CIPLA.NS
-- Aurobindo Pharma: AUROPHARMA.NS
-- Lupin: LUPIN.NS
-- Divi's Laboratories: DIVISLAB.NS
-- Biocon: BIOCON.NS
-
-Global Pharma companies:
-- Pfizer: PFE
-- Johnson & Johnson: JNJ
-- Novartis: NVS
-- Roche: RHHBY"""
+NOTE: Do NOT hardcode stock tickers. The agent has a tool to fetch financial data by company name which resolves tickers automatically."""
 
     @property
     def research_context(self) -> str:

@@ -9,6 +9,10 @@ class ITAgent(BaseAgent):
         return Sector.IT
 
     @property
+    def sector_description(self) -> str:
+        return "IT / Technology services sector"
+
+    @property
     def planning_context(self) -> str:
         return """You are planning research for the IT / Technology services sector.
 Key areas to investigate:
@@ -19,22 +23,11 @@ Key areas to investigate:
 - Client concentration and top client metrics
 - AI/automation adoption and investments
 - Margins: EBITDA, operating margin, net margin trends
-- Competitive positioning vs global peers (Accenture, IBM, Cognizant)
+- Competitive positioning vs global peers
 - Currency impact and hedging strategy
 - Guidance and management commentary
 
-Major Indian IT companies and their tickers:
-- TCS (Tata Consultancy Services): TCS.NS
-- Infosys: INFY.NS
-- Wipro: WIPRO.NS
-- HCL Technologies: HCLTECH.NS
-- Tech Mahindra: TECHM.NS
-- LTIMindtree: LTIM.NS
-
-Global IT companies:
-- Accenture: ACN
-- IBM: IBM
-- Cognizant: CTSH"""
+NOTE: Do NOT hardcode stock tickers. The agent has a tool to fetch financial data by company name which resolves tickers automatically."""
 
     @property
     def research_context(self) -> str:

@@ -1,30 +1,28 @@
 import logging
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+import asyncio
+from fastapi import APIRouter, HTTPException
 from models.schemas import (
     ResearchRequest, ApprovalRequest,
-    PlanResponse, StatusResponse, ReportResponse, InsightItem, ToolUseItem,
+    PlanResponse, StatusResponse, ReportResponse, InsightItem, ActivityItem,
     SessionStatus, ResearchSession, Sector,
 )
-from tools.memory import get_insights, get_tools_used, set_session, get_progress
+from tools.memory import get_progress, get_insights, get_activity, request_stop, get_covered_steps
 from tools.llm import LLMClient
 from core.planner import SectorClassifier, ResearchPlanner
-from core.research_agent import run_research
+from core.research_engine import run_research
 from agents.registry import AgentRegistry
-from agents.it_agent import ITAgent
-from agents.pharma_agent import PharmaAgent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/research", tags=["research"])
 
-# Initialize
-llm = LLMClient()
-classifier = SectorClassifier(llm)
-planner = ResearchPlanner(llm)
-
+# Initialize — agents are auto-discovered from the agents/ package
 registry = AgentRegistry()
-registry.register(ITAgent())
-registry.register(PharmaAgent())
+registry.auto_discover()
+
+llm = LLMClient()
+classifier = SectorClassifier(llm, sector_descriptions=registry.sector_descriptions())
+planner = ResearchPlanner(llm)
 
 session_store: dict[str, ResearchSession] = {}
 
@@ -36,10 +34,11 @@ async def submit_research(req: ResearchRequest):
     route, _ = await classifier.classify(req.query)
 
     if route == "decline":
-        raise HTTPException(status_code=400, detail="Not a financial query or outside supported sectors (IT/Pharma).")
+        available = ", ".join(s.upper() for s in registry.sector_descriptions())
+        raise HTTPException(status_code=400, detail=f"Not a financial query or outside supported sectors ({available}).")
 
     if route == "clarify":
-        raise HTTPException(status_code=400, detail="Could not determine sector. Specify IT or Pharma.")
+        raise HTTPException(status_code=422, detail="CLARIFY_SECTOR")
 
     # 2. Route to agent
     sector = Sector(route)
@@ -64,12 +63,12 @@ async def submit_research(req: ResearchRequest):
         sector=sector,
         plan=plan,
         message=f"{plan.research_depth.capitalize()} research plan for {sector.value.upper()} sector. "
-                f"{len(plan.steps)} steps planned.",
+                f"{len(plan.steps)} steps planned. Deep research with discovery + reflection.",
     )
 
 
 @router.post("/{session_id}/approve", response_model=StatusResponse)
-async def approve_plan(session_id: str, req: ApprovalRequest, background_tasks: BackgroundTasks):
+async def approve_plan(session_id: str, req: ApprovalRequest):
 
     session = session_store.get(session_id)
     if not session:
@@ -89,19 +88,19 @@ async def approve_plan(session_id: str, req: ApprovalRequest, background_tasks: 
             current_step_description="Plan rejected",
         )
 
-    # Start research agent in background
+    # Start deep research in background
     session.status = SessionStatus.RESEARCHING
     sector_agent = registry.get(session.plan.sector)
-    background_tasks.add_task(run_research, session, sector_agent)
+    asyncio.create_task(run_research(session, sector_agent))
 
-    logger.info(f"Session {session.id}: approved, research agent started")
+    logger.info(f"Session {session.id}: approved, deep research started")
 
     return StatusResponse(
         session_id=session.id,
         status=session.status,
         current_step=0,
         total_steps=session.total_steps,
-        current_step_description="Research started...",
+        current_step_description="Deep research started — Plan → Search → Discover → Reflect...",
     )
 
 
@@ -112,29 +111,27 @@ async def get_status(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Set session context so memory reads the right session's data
-    set_session(session_id)
-
-    raw_insights = get_insights.invoke({})
-    insights = [
-        InsightItem(step=i["step"], content=i["content"], source=i["source"])
-        for i in raw_insights
-    ]
-
-    raw_tools = get_tools_used()
-    tools_used = [
-        ToolUseItem(tool=t["tool"], step=t["step"], input=t["input"])
-        for t in raw_tools
-    ]
-
-    # Use live progress from memory during research, fall back to session fields when done
-    progress = get_progress()
+    progress = get_progress(session_id)
     if session.status == SessionStatus.RESEARCHING:
         current_step = progress["current_step"]
         description = progress["description"]
     else:
         current_step = session.current_step
         description = session.current_step_description
+
+    # Get live insights from memory
+    raw_insights = get_insights(session_id)
+    insights = [
+        InsightItem(step=i["step"], content=i["content"], source=i["source"])
+        for i in raw_insights
+    ]
+
+    # Get activity/reasoning stream
+    raw_activity = get_activity(session_id)
+    activity = [
+        ActivityItem(type=a["type"], message=a["message"], detail=a.get("detail", ""), ts=a.get("ts", 0))
+        for a in raw_activity
+    ]
 
     return StatusResponse(
         session_id=session.id,
@@ -143,8 +140,25 @@ async def get_status(session_id: str):
         total_steps=session.total_steps,
         current_step_description=description,
         insights=insights,
-        tools_used=tools_used,
+        activity=activity,
+        covered_steps=get_covered_steps(session_id),
     )
+
+
+@router.post("/{session_id}/stop")
+async def stop_research(session_id: str):
+    """Force stop research and generate report from whatever has been collected."""
+    session = session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != SessionStatus.RESEARCHING:
+        raise HTTPException(status_code=400, detail=f"Session is '{session.status}', not researching")
+
+    request_stop(session_id)
+    logger.info(f"Session {session_id}: force stop requested")
+
+    return {"session_id": session_id, "message": "Stop requested. Report will generate from collected data."}
 
 
 @router.get("/{session_id}/report", response_model=ReportResponse)

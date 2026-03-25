@@ -11,6 +11,13 @@ class BaseAgent(ABC):
 
     @property
     @abstractmethod
+    def sector_description(self) -> str:
+        """Short description used by the classifier to route queries to this agent.
+        Example: 'IT / Technology services sector'"""
+        ...
+
+    @property
+    @abstractmethod
     def planning_context(self) -> str:
         """Injected into the planner system prompt for sector-specific plan generation."""
         ...
