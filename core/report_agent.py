@@ -19,14 +19,16 @@ from tools.memory import log_activity
 logger = logging.getLogger("deep-research")
 
 llm_smart = ChatOpenAI(
-    api_key=settings.openai_api_key,
-    model=settings.openai_model_smart,
+    api_key=settings.openrouter_api_key,
+    base_url=settings.openrouter_base_url,
+    model=settings.model_smart,
     temperature=0.3,
 )
 
 llm_editor = ChatOpenAI(
-    api_key=settings.openai_api_key,
-    model=settings.openai_model_smart,
+    api_key=settings.openrouter_api_key,
+    base_url=settings.openrouter_base_url,
+    model=settings.model_smart,
     temperature=0.2,
 )
 

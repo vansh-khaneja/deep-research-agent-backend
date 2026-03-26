@@ -162,11 +162,14 @@ cp .env.example .env
 Create a `.env` file:
 
 ```
-OPENAI_API_KEY=your-openai-key
+OPENROUTER_API_KEY=your-openrouter-key
 TAVILY_API_KEY=your-tavily-key
-OPENAI_MODEL_SMART=gpt-4o
-OPENAI_MODEL_FAST=gpt-4o-mini
+OPENAI_API_KEY=your-openai-key          # only for embeddings
+MODEL_SMART=openai/gpt-4o               # or anthropic/claude-sonnet-4, google/gemini-2.5-pro, etc.
+MODEL_FAST=openai/gpt-4o-mini           # or anthropic/claude-haiku-3.5, etc.
 ```
+
+LLM calls go through [OpenRouter](https://openrouter.ai), so you can swap models without code changes. Embeddings still use OpenAI directly (OpenRouter doesn't support embedding models).
 
 ### Run Backend
 
@@ -251,7 +254,7 @@ Uploads a PDF into the session's ChromaDB collection for the agent to search.
 
 - **Backend**: FastAPI, Python 3.12
 - **Agent Framework**: LangGraph (state machine), LangChain (tool calling)
-- **LLMs**: GPT-4o (research, planning, report writing), GPT-4o-mini (classification, critic)
+- **LLM Router**: OpenRouter (swap models via config — GPT-4o, Claude, Gemini, etc.)
 - **Web Search**: Tavily API
 - **Financial Data**: yfinance + Yahoo Finance search API
 - **RAG**: ChromaDB + OpenAI embeddings

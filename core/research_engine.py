@@ -43,10 +43,10 @@ logger = logging.getLogger("deep-research")
 # =======================
 
 def _llm(temperature: float = 0.2):
-    return ChatOpenAI(api_key=settings.openai_api_key, model=settings.openai_model_fast, temperature=temperature)
+    return ChatOpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url, model=settings.model_fast, temperature=temperature)
 
 def _llm_smart(temperature: float = 0.3):
-    return ChatOpenAI(api_key=settings.openai_api_key, model=settings.openai_model_smart, temperature=temperature)
+    return ChatOpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url, model=settings.model_smart, temperature=temperature)
 
 
 # =======================

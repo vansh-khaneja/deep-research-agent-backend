@@ -10,8 +10,9 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.llm = ChatOpenAI(
-            api_key=api_key or settings.openai_api_key,
-            model=model or settings.openai_model_smart,
+            api_key=api_key or settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            model=model or settings.model_smart,
             temperature=0.3,
         )
 
